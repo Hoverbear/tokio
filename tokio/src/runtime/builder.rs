@@ -55,6 +55,12 @@ pub struct Builder {
     /// Only used when not using the current-thread executor.
     worker_threads: Option<usize>,
 
+    /// The core affinity permitted for the threads, used by Runtime.
+    ///
+    /// Takes a list of CPU IDs (as discovered by
+    /// [`libc::sched_getcpu`](https://docs.rs/libc/0.2.92/libc/fn.sched_getcpu.html)).
+    core_affinity: Option<Vec<usize>>,
+
     /// Cap on thread usage.
     max_blocking_threads: usize,
 
@@ -123,6 +129,9 @@ impl Builder {
 
             // Default to lazy auto-detection (one thread per CPU core)
             worker_threads: None,
+
+            // Default to no configured core affinity
+            core_affinity: None,
 
             max_blocking_threads: 512,
 
@@ -217,6 +226,44 @@ impl Builder {
     pub fn worker_threads(&mut self, val: usize) -> &mut Self {
         assert!(val > 0, "Worker threads cannot be set to 0");
         self.worker_threads = Some(val);
+        self
+    }
+
+    /// Sets the list of cores the Runtime will operate over.
+    ///
+    /// This can be any non-empty list, though it is advised to keep this value
+    /// on the smaller side.
+    ///
+    /// # Default
+    ///
+    /// The default value is all of the cores of the system may be operated over.
+    ///
+    /// # Panic
+    ///
+    /// When passed an empty list this function will panic.
+    ///
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio::runtime;
+    ///
+    /// // This will spawn a Tokio runtime which only operates over 4 cores.
+    /// let rt = runtime::Builder::new_multi_thread()
+    ///     .worker_threads(4)
+    ///     .core_affinity(vec![1, 2, 3, 4])
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// rt.spawn(async move {});
+    /// ```
+    ///
+    /// # Panic
+    ///
+    /// This will panic if `cpuids` is empty.
+    pub fn core_affinity(&mut self, cpuids: Vec<usize>) -> &mut Self {
+        assert!(!cpuids.is_empty(), "Core affinity list cannot be empty");
+        self.core_affinity = Some(cpuids);
         self
     }
 
@@ -445,7 +492,7 @@ impl Builder {
         let spawner = Spawner::Basic(scheduler.spawner().clone());
 
         // Blocking pool
-        let blocking_pool = blocking::create_blocking_pool(self, self.max_blocking_threads);
+        let blocking_pool = blocking::create_blocking_pool(self, self.max_blocking_threads, self.core_affinity.clone());
         let blocking_spawner = blocking_pool.spawner().clone();
 
         Ok(Runtime {
@@ -550,7 +597,7 @@ cfg_rt_multi_thread! {
             let spawner = Spawner::ThreadPool(scheduler.spawner().clone());
 
             // Create the blocking pool
-            let blocking_pool = blocking::create_blocking_pool(self, self.max_blocking_threads + core_threads);
+            let blocking_pool = blocking::create_blocking_pool(self, self.max_blocking_threads + core_threads, self.core_affinity.clone());
             let blocking_spawner = blocking_pool.spawner().clone();
 
             // Create the runtime handle

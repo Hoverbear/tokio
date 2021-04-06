@@ -14,6 +14,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{mpsc, Arc};
 use std::task::{Context, Poll};
+use tokio_stream::StreamExt;
 
 #[test]
 fn single_thread() {
@@ -371,6 +372,41 @@ fn coop_and_block_in_place() {
         .await
         .unwrap();
     });
+}
+
+#[test]
+fn core_affinity() {
+    const SPAWNS: usize = 1000;
+
+    fn with_configured_cores(configured_cores: Vec<usize>, spawns: usize) {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .core_affinity(configured_cores.clone())
+            .build()
+            .unwrap();
+
+        rt.block_on(async move {
+            let (tx, rx) = tokio::sync::mpsc::channel(1024);
+
+            let spawns = (0..SPAWNS).map(|_| {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let cpu = unsafe { libc::sched_getcpu() as usize };
+                    tx.send(cpu).await.unwrap();
+                })
+            });
+            futures::future::join_all(spawns).await;
+            drop(tx);
+
+            let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+            let used_cores = stream.collect::<Vec<_>>().await;
+            assert!(used_cores.iter().all(|v| configured_cores.contains(v)));
+        });
+    }
+
+    with_configured_cores(vec![2, 3], SPAWNS);
+    with_configured_cores(vec![1], SPAWNS);
+    with_configured_cores(vec![1, 2, 3, 4], SPAWNS);
+    with_configured_cores(vec![3, 4], SPAWNS);
 }
 
 // Testing this does not panic

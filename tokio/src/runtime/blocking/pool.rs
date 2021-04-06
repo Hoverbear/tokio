@@ -14,6 +14,7 @@ use crate::util::error::CONTEXT_MISSING_ERROR;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::time::Duration;
+use std::os::unix::thread::JoinHandleExt;
 
 pub(crate) struct BlockingPool {
     spawner: Spawner,
@@ -46,6 +47,9 @@ struct Inner {
 
     // Maximum number of threads
     thread_cap: usize,
+
+    // cpuids which the pool may operate over.
+    cpuids: Option<Vec<usize>>,
 
     // Customizable wait timeout
     keep_alive: Duration,
@@ -101,7 +105,7 @@ where
 // ===== impl BlockingPool =====
 
 impl BlockingPool {
-    pub(crate) fn new(builder: &Builder, thread_cap: usize) -> BlockingPool {
+    pub(crate) fn new(builder: &Builder, thread_cap: usize, cpuids: Option<Vec<usize>>) -> BlockingPool {
         let (shutdown_tx, shutdown_rx) = shutdown::channel();
         let keep_alive = builder.keep_alive.unwrap_or(KEEP_ALIVE);
 
@@ -125,6 +129,7 @@ impl BlockingPool {
                     after_start: builder.after_start.clone(),
                     before_stop: builder.before_stop.clone(),
                     thread_cap,
+                    cpuids,
                     keep_alive,
                 }),
             },
@@ -229,7 +234,7 @@ impl Spawner {
             let id = shared.worker_thread_index;
             shared.worker_thread_index += 1;
 
-            let handle = self.spawn_thread(shutdown_tx, rt, id);
+            let handle = self.spawn_thread(shutdown_tx, rt, id, self.inner.cpuids.as_ref());
 
             shared.worker_threads.insert(id, handle);
         }
@@ -242,6 +247,7 @@ impl Spawner {
         shutdown_tx: shutdown::Sender,
         rt: &Handle,
         id: usize,
+        cpuids: Option<&Vec<usize>>,
     ) -> thread::JoinHandle<()> {
         let mut builder = thread::Builder::new().name((self.inner.thread_name)());
 
@@ -251,14 +257,33 @@ impl Spawner {
 
         let rt = rt.clone();
 
-        builder
+        let handle = builder
             .spawn(move || {
                 // Only the reference should be moved into the closure
                 let _enter = crate::runtime::context::enter(rt.clone());
                 rt.blocking_spawner.inner.run(id);
                 drop(shutdown_tx);
             })
-            .unwrap()
+            .unwrap();
+
+        if let Some(cpuids) = cpuids {
+            let thread_id = handle.as_pthread_t();
+            set_thread_affinity(thread_id, cpuids);
+        }
+
+        handle
+    }
+}
+
+fn set_thread_affinity(thread: std::os::unix::thread::RawPthread, cpuids: &[usize]) {
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+
+        for cpuid in cpuids {
+            libc::CPU_SET(*cpuid, &mut set);
+        }
+
+        libc::pthread_setaffinity_np(thread, std::mem::size_of::<libc::cpu_set_t>(), &set);
     }
 }
 

@@ -12,8 +12,8 @@ pub(crate) mod task;
 
 use crate::runtime::Builder;
 
-pub(crate) fn create_blocking_pool(builder: &Builder, thread_cap: usize) -> BlockingPool {
-    BlockingPool::new(builder, thread_cap)
+pub(crate) fn create_blocking_pool(builder: &Builder, thread_cap: usize, cpuids: Option<Vec<usize>>) -> BlockingPool {
+    BlockingPool::new(builder, thread_cap, cpuids)
 }
 
 /*
